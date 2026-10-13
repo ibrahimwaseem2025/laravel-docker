@@ -53,6 +53,10 @@ RUN addgroup -g $GID laravel && \
     mkdir -p /var/www/storage/logs && \
     chown -R laravel:laravel /var/www
 
+# Node.js for frontend builds (vite). Installed in its own late layer so the
+# expensive PHP extension build layers above stay cached.
+RUN apk add --no-cache nodejs npm
+
 # Set working directory
 WORKDIR /var/www
 

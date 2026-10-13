@@ -1,6 +1,6 @@
 # Laravel Docker Project
 
-This project provides a fully Dockerized development environment for a Laravel 12 application using PHP 8.4 FPM, PostgreSQL, Redis, and Nginx.
+This project provides a fully Dockerized development environment for a Laravel 12 application using PHP 8.4 FPM, PostgreSQL 16, Redis, and Nginx.
 
 ## Project Structure
 
@@ -15,6 +15,7 @@ project-root/
 │   │   └── Dockerfile
 │   └── entrypoint.sh         # Entrypoint script for Laravel setup
 ├── docker-compose.yml        # Docker Compose service definitions
+├── Makefile                  # Dev workflow (make help)
 ├── .env.example              # Environment variable template
 └── README.md
 ```
@@ -26,117 +27,116 @@ project-root/
 -   **Database**: PostgreSQL 16
 -   **Cache**: Redis 7 (Alpine)
 -   **Web Server**: Nginx (Alpine)
--   **Orchestration**: Docker Compose
-
-### ⚙️ Environment Flexibility
-
-By default, the application looks for a `.env.docker` file **inside the container**.
-
-To support multiple workflows:
-
--   If `.env.docker` exists → it will be used and copied as `.env`
--   If not → `.env` or `.env.example` will be used instead
-
-This logic is handled inside `entrypoint.sh` automatically, so developers can work with whichever they prefer.
+-   **Orchestration**: Docker Compose or Podman (auto-detected by the Makefile)
 
 ## Getting Started
 
 ### Prerequisites
 
-Ensure Docker and Docker Compose are installed:
+Docker (with the compose plugin) **or** Podman (with `podman compose`), plus GNU Make.
+
+### Quick start
 
 ```bash
-docker --version
-docker compose version
+cp .env.example .env   # optional; the entrypoint copies it for you if missing
+make up                # build images, start the stack, show status
 ```
 
-### Setting Up the Environment
+Then visit [http://localhost:8000](http://localhost:8000).
 
-1. Copy the .env.example file to .env and adjust any necessary environment variables:
+The Makefile auto-detects the compose provider. To force one explicitly:
 
 ```bash
-cp .env.example .env
+make up COMPOSE="podman compose"
+make up COMPOSE="docker compose"
 ```
 
-2. Start the Docker Compose Services:
+### Common commands
 
-```bash
-docker-compose up -d --build
-```
+| Command              | What it does                                        |
+|----------------------|-----------------------------------------------------|
+| `make up`            | Build and start everything (detached)               |
+| `make down`          | Stop containers (keeps data volumes)                |
+| `make ps`            | Show container status                               |
+| `make logs`          | Follow logs (`LOGS_ARGS="--tail=100 php"` to filter)|
+| `make shell`         | Shell inside the PHP container                      |
+| `make migrate`       | Apply pending migrations (non-destructive)          |
+| `make migrate-fresh CONFIRM=yes` | Drop all tables and re-migrate (destructive) |
+| `make seed`          | Seed the database                                   |
+| `make assets`        | Build frontend assets (vite) in the container       |
+| `make test`          | Run the test suite (in-memory sqlite)               |
+| `make debug-php`     | PHP version, extensions, DB/Redis connectivity      |
+| `make rebuild CONFIRM=yes` | Wipe volumes, rebuild images, restart         |
+| `make artisan c="..."` | Run any artisan command in the container          |
 
-3. Access the Application:
+Destructive targets (`migrate-fresh`, `rebuild`, `destroy`) refuse to run without `CONFIRM=yes`.
 
-Visit: [http://localhost:8000](http://localhost:8000)
+### ⚙️ Environment Flexibility
+
+On startup, `docker/entrypoint.sh` picks the env file in this order:
+
+1. `.env.docker` (if present) → copied to `.env`
+2. else existing `.env`
+3. else `.env.example` → copied to `.env`
+
+Inside the `php` container, `docker-compose.yml` sets `DB_HOST`, `DB_PORT`, `DB_DATABASE`, `DB_USERNAME`, `DB_PASSWORD`, `REDIS_HOST` and `REDIS_CLIENT` explicitly, so the stack works even with a stale local `.env`. These values match the `postgres` and `redis` services in `docker-compose.yml` (`laravel` / `secret` / `laravel-docker`).
+
+### What runs on container startup
+
+`docker/entrypoint.sh` automatically:
+
+- Installs Composer dependencies
+- Generates `APP_KEY` only if it is missing (restarts never rotate it)
+- Waits for PostgreSQL and Redis **with a 60s timeout**, failing fast with a clear error instead of hanging
+- Runs pending migrations (`php artisan migrate --force`) — non-destructive
+- Seeds the database only if `RUN_SEEDERS=true`
+- Caches Laravel config, routes, and views
+- Fixes `storage` and `bootstrap/cache` permissions, then starts PHP-FPM
 
 ### Accessing inside the Container
 
-### Rebuild Containers:
-
 ```bash
-docker-compose up -d --build
-```
-
-### Stop Containers:
-
-```bash
-docker-compose down
-```
-
-### View Logs:
-
-```bash
-docker-compose logs -f
-```
-
-For specific services, you can use:
-
-```bash
-docker-compose logs -f php
-```
-
-## Laravel Setup (Inside the Container)
-
-After container startup, the `entrypoint.sh` automatically:
-
--   Installs dependencies via Composer
--   Generates application key
--   Waits for PostgreSQL to be ready
--   Runs database migrations and seeds
--   Caches Laravel config, routes, and views
--   Fixes storage & cache directory permissions
-
-You can manually access the PHP container with:
-
-```bash
-docker-compose exec php bash
-```
-
-Or run artisan commands directly:
-
-```bash
-docker-compose exec php php artisan migrate
+make shell                      # sh (the image does not include bash)
+make artisan c="migrate:status"
 ```
 
 ## Technical Notes
 
 -   **Environment Isolation**: The application runs entirely inside containers, ensuring your host machine stays clean.
--   **File Permissions**: UID/GID synchronization is configurable via `.env.example` to avoid permission issues between Windows/WSL and Linux containers.
+-   **File Permissions**: UID/GID synchronization is configurable via `ARG UID`/`ARG GID` in `docker/php/Dockerfile`.
 -   **Database**: A PostgreSQL role and database are automatically created based on the `POSTGRES_USER` and `POSTGRES_DB` environment variables.
--   **Redis Integration**: Laravel is configured to use Redis for cache and sessions. You can choose between `phpredis` or `predis` by updating your `.env` file.
+-   **Redis Integration**: Laravel uses Redis for cache and sessions (`phpredis` extension is compiled into the image).
+-   **Podman**: Rootless Podman works out of the box; `podman compose` is detected automatically (or set `COMPOSE="podman compose"`).
 
 ## 💡 Troubleshooting
 
-### `FATAL: role "postgres" does not exist`
+### `FATAL: role "laravel" does not exist` / auth failures
 
-Make sure you are using the correct `POSTGRES_USER` and healthcheck in your `docker-compose.yml`. The default is:
+Make sure `.env` matches the `postgres` service in `docker-compose.yml`:
 
-```yaml
-POSTGRES_USER=laravel
-POSTGRES_DB=laravel-docker
+```
+DB_DATABASE=laravel-docker
+DB_USERNAME=laravel
+DB_PASSWORD=secret
 ```
 
-And the healthcheck should be:
+(`.env.example` already ships with these values, and the `php` service sets them as container environment variables, which take precedence over `.env`.)
 
-```yaml
-test: ["CMD-SHELL", "pg_isready -U laravel -d laravel-docker"]
-```
+### The php container exits on startup
+
+Check the reason with `make logs LOGS_ARGS="php"`. Startup fails fast with an explicit message if PostgreSQL or Redis is unreachable for more than 60 seconds — no silent hanging.
+
+### SELinux hosts (Fedora/RHEL)
+
+The bind mounts in `docker-compose.yml` use the `:z` suffix so Podman/Docker can
+relabel the files for the containers. This is a no-op on non-SELinux systems.
+
+### Frontend assets / Vite
+
+Breeze feature tests and any page using `@vite` need built assets. `make test`
+builds them automatically on first run; build manually with `make assets`
+(Node.js is included in the PHP image).
+
+### Port 8000 already in use
+
+Change the host port in `docker-compose.yml` (`ports: - "8000:80"`) and update `APP_URL` in `.env`.
